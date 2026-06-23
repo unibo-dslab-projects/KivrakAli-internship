@@ -1,0 +1,15 @@
+# Build / cache
+__pycache__/
+*.pyc
+build/
+install/
+log/
+
+# Cloned upstream repos (rebuilt via README instructions, not committed)
+unitree_ros2/
+unitree_mujoco/
+unitree_sdk2_python/
+cyclonedds/
+
+# OS
+.DS_Store

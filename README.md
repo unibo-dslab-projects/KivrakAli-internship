@@ -126,7 +126,7 @@ and **enabling multicast on the loopback interface** (see
 docker run -it --name ros2-go2 \
   --cap-add NET_ADMIN \
   -e DISPLAY=host.docker.internal:0 \
-  -v <host-path>/ros2_tutorials:/root/ros2_ws \
+  -v /Users/aliyagiz/ros2_tutorials:/root/ros2_ws \
   ros2-go2-img zsh
 
 # Inside the container: enable loopback multicast (needed for DDS discovery)
@@ -219,23 +219,21 @@ macOS-native setup is only useful for the visual/SDK demo, not for ROS 2.
 
 ## 6. File inventory
 
-> Adjust the paths/names below to match the actual layout in this repository.
-
-**macOS-native (Unitree SDK based):**
+**`go2_sim/mac/` — macOS-native (Unitree SDK based):**
 - `pose_go2.py` — move the robot to a named static pose (interpolated).
 - `demo_go2.py` — scripted pose sequence.
 - `key_teleop_go2.py` — interactive keyboard teleop (terminal input, SDK pub/sub).
+- `config_mac.py` — sim config for macOS (`INTERFACE="lo0"`, `USE_JOYSTICK=0`, `DOMAIN_ID=1`, `SIMULATE_DT=0.002`).
 
-**Container — simulation:**
+**`go2_sim/container/` — simulation:**
 - `sim_headless.py` — runs the MuJoCo physics + DDS bridge with no viewer window.
-- `config.py` changes — `INTERFACE="lo"`, `USE_JOYSTICK=0`, `DOMAIN_ID=1`.
+- `config_container.py` — sim config for the container (`INTERFACE="lo"`, `USE_JOYSTICK=0`, `DOMAIN_ID=1`).
 
-**Container — ROS 2:**
+**`go2_sim/container/` — ROS 2:**
 - `setup_sim.sh` — sources ROS 2 + `unitree_ros2` + CycloneDDS and sets the
   loopback/simulation DDS configuration.
 - `ros_teleop_go2.py` — **the main deliverable**: rclpy node publishing
   `unitree_go/msg/LowCmd` to `/lowcmd`, subscribing `/lowstate`, with SDK-computed CRC.
-
 ---
 
 ## 7. Key technical notes (lessons learned)

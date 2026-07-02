@@ -1,17 +1,18 @@
-# Unitree Go2 — Simulation & ROS 2 Low-Level Control
+# Unitree Go2 — Simulation, ROS 2 Control & Foxglove Visualization
 
-This repository documents my work on setting up a simulation and control pipeline for the
-**Unitree Go2** quadruped, carried out during my Erasmus+ research internship
-(University of Bologna, Cesena campus). It is part of the broader project on
-distributed coordination of unmanned ground vehicles (UGVs) with an LLM-based
-supervisory layer; this phase focused on building hands-on competency with the
-robot communication stack (DDS / ROS 2) and a working simulation-control loop.
+This repository documents my work on setting up a simulation, control, and visualization
+pipeline for the **Unitree Go2** quadruped, carried out during my Erasmus+ research
+internship (University of Bologna, Cesena campus). It is part of the broader project on
+distributed coordination of unmanned ground vehicles (UGVs) with an LLM-based supervisory
+layer; this phase focused on building hands-on competency with the robot communication
+stack (DDS / ROS 2), a working simulation-control loop, and 3D visualization.
 
-The end result is a **ROS 2 (rclpy) node that controls the simulated Go2's body
-pose in real time** by publishing `unitree_go/msg/LowCmd` to `/lowcmd` and reading
-`/lowstate`, using the official `unitree_ros2` message interface.
+The end result is a **ROS 2 (rclpy) node that controls the simulated Go2's body pose in
+real time** (publishing `unitree_go/msg/LowCmd` to `/lowcmd`, reading `/lowstate`, using
+the official `unitree_ros2` message interface), together with a **Foxglove Studio setup
+that shows the moving robot as a live 3D model**.
 
-> **Note for review:** Section [Known limitations & open issues](#5-known-limitations--open-issues)
+> **Note for review:** Section [Known limitations & open issues](#6-known-limitations--open-issues)
 > is the most important part if you are looking for where things are fragile or non-standard.
 
 ---
@@ -27,6 +28,9 @@ pose in real time** by publishing `unitree_go/msg/LowCmd` to `/lowcmd` and readi
 - **A ROS 2 (rclpy) teleop node** that drives the simulated robot through `/lowcmd`.
   Verified: `ros2 topic info /lowcmd` shows `Publisher count: 1, Subscription count: 1`
   while the node runs, and `/lowstate` reflects the commanded changes.
+- **Foxglove Studio visualization**: the headless sim is shown on the host as live plots
+  (joint angles, body height) and as a **3D robot model with meshes** that moves as the
+  robot is driven. See [section 4](#4-foxglove-visualization-3d-robot-view).
 
 What the robot can do in both setups: **body-pose control** — raise/lower the body,
 roll, pitch, and a few preset stances (stand / sit / bow). All four feet stay planted,
@@ -76,6 +80,8 @@ Installed in the container:
   (`CYCLONEDDS_HOME`).
 - `unitree_ros2` (ROS 2 message packages `unitree_go`, `unitree_api`, `unitree_hg`,
   plus examples), built against its own CycloneDDS in `cyclonedds_ws/`.
+- `ros-humble-foxglove-bridge` and `ros-humble-robot-state-publisher` (for the Foxglove
+  3D visualization — see section 4).
 
 Because the sim's MuJoCo viewer cannot open inside the container (see
 [issue 1](#1-no-gui-inside-the-container)), the sim runs **headless** via a small
@@ -114,17 +120,93 @@ combination stays inside the Go2 joint limits.
 
 ---
 
-## 4. Setup / reproduction (container)
+## 4. Foxglove visualization (3D robot view)
 
-This assumes the committed image already contains MuJoCo, the SDK, CycloneDDS, and
-`unitree_ros2`. The two non-obvious requirements are the **`NET_ADMIN` capability**
-and **enabling multicast on the loopback interface** (see
-[issue 3](#3-dds-discovery-on-loopback-needs-net_admin--multicast)).
+Because the MuJoCo viewer cannot open inside the container (see
+[issue 1](#1-no-gui-inside-the-container)), the simulated robot is visualized in
+**Foxglove Studio** running on the host (macOS), connected to the container's ROS 2
+stack over a WebSocket bridge. This shows the robot both as live plots (joint angles,
+body height) and as a **3D model that moves with the simulation**.
+
+Pipeline for the 3D model:
+
+```
+/lowstate (unitree_go/msg/LowState)
+   -> [lowstate_to_jointstate.py]          # 12 motor angles -> URDF joint names
+/joint_states (sensor_msgs/JointState)
+   -> [robot_state_publisher + Go2 URDF]
+/tf  ->  Foxglove 3D panel (loads the URDF, poses each link from /tf)
+```
+
+Components:
+
+- `foxglove_bridge` (installed in the container) exposes the ROS 2 topics over
+  `ws://localhost:8765`. The container is run with `-p 8765:8765` so the host can reach
+  it.
+- `lowstate_to_jointstate.py` subscribes to `/lowstate` with **best-effort QoS**
+  (`qos_profile_sensor_data`) and republishes the 12 joint angles as
+  `sensor_msgs/JointState`, mapping the Unitree motor order (FR, FL, RR, RL) to the Go2
+  URDF joint names (`FR_hip_joint`, `FR_thigh_joint`, ...). The best-effort QoS matters:
+  Unitree publishes `/lowstate` as best-effort, so a default (reliable) subscription
+  receives no messages — this was also why a naive teleop/CLI subscriber would hang on
+  "waiting for /lowstate" while `foxglove_bridge` (which adapts QoS) worked fine.
+- `robot_state_publisher` loads the Go2 URDF (from the `unitree_ros` description package,
+  cloned separately) and publishes `/tf` + `/robot_description`.
+
+Running it (in addition to the sim), each in its own sourced terminal:
 
 ```bash
-# Start the container WITH NET_ADMIN and a display + workspace mount
+# Foxglove bridge
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+
+# LowState -> JointState bridge
+cd ~/ros2_ws && python3 lowstate_to_jointstate.py
+
+# robot_state_publisher with the Go2 URDF
+ros2 run robot_state_publisher robot_state_publisher \
+  ~/unitree_ros/robots/go2_description/urdf/go2_description.urdf
+```
+
+Then in Foxglove: **Open connection → Foxglove WebSocket → `ws://localhost:8765`**, add
+a **3D panel**, and set the **display frame** to `base`. Add **Plot** panels for
+`/lowstate.motor_state[i].q` (joint angles) and `/sportmodestate.position[2]` (body
+height) to see the values change as the robot is driven.
+
+**Mesh loading caveat:** the Go2 URDF references meshes as `package://go2_description/...`.
+The Foxglove **web** app cannot resolve `package://` (or `file://`) paths, so it shows
+only the TF axes, not the meshes. The **desktop** app is required, and even there
+`ROS_PACKAGE_PATH` resolution was unreliable. The meshes were finally loaded by copying
+the description to the host and rewriting the mesh paths to absolute `file://` paths,
+then adding that URDF as a **"File path" custom layer** in the 3D panel:
+
+```bash
+# on the host: copy the description out of the container
+docker cp ros2-go2:/root/unitree_ros/robots/go2_description ~/go2_foxglove/
+
+# rewrite package:// -> absolute file:// paths
+sed 's|package://go2_description/|file:///Users/aliyagiz/go2_foxglove/go2_description/|g' \
+  ~/go2_foxglove/go2_description/urdf/go2_description.urdf \
+  > ~/go2_foxglove/go2_fixed.urdf
+# then in Foxglove: 3D panel -> Custom layers -> + -> URDF -> File path -> go2_fixed.urdf
+```
+
+Result: the Go2 appears in the 3D panel with meshes, and driving it via the ROS 2
+teleop moves the legs live.
+
+---
+
+## 5. Setup / reproduction (container)
+
+This assumes the committed image already contains MuJoCo, the SDK, CycloneDDS,
+`unitree_ros2`, `foxglove_bridge`, and `robot_state_publisher`. The two non-obvious
+requirements are the **`NET_ADMIN` capability** and **enabling multicast on the loopback
+interface** (see [issue 3](#3-dds-discovery-on-loopback-needs-net_admin--multicast)).
+
+```bash
+# Start the container WITH NET_ADMIN, the Foxglove port, a display + workspace mount
 docker run -it --name ros2-go2 \
   --cap-add NET_ADMIN \
+  -p 8765:8765 \
   -e DISPLAY=host.docker.internal:0 \
   -v /Users/aliyagiz/ros2_tutorials:/root/ros2_ws \
   ros2-go2-img zsh
@@ -146,21 +228,35 @@ export ROS_DOMAIN_ID=1
 export CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo" priority="default" multicast="true"/></Interfaces></General></Domain></CycloneDDS>'
 ```
 
-Run (each terminal is a `docker exec -it ros2-go2 zsh` that first does
-`source ~/unitree_ros2/setup_sim.sh`):
+Run — each terminal is a `docker exec -it ros2-go2 zsh` that first does
+`source ~/unitree_ros2/setup_sim.sh`. The full 3D-visualization setup uses five
+terminals:
 
 ```bash
-# Terminal A — headless simulator
+# 1 — headless simulator
 cd ~/unitree_mujoco/simulate_python && python3 ./sim_headless.py
 
-# Terminal B — ROS 2 (rclpy) teleop
-cd ~/ros2_ws && python3 ros_teleop_go2.py
+# 2 — Foxglove bridge
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 
-# Terminal C (optional) — verify the bridge
-ros2 topic list                 # should list /lowcmd /lowstate /sportmodestate ...
-ros2 topic info /lowcmd         # Publisher count: 1, Subscription count: 1 while teleop runs
-ros2 topic echo /lowstate --once
+# 3 — LowState -> JointState bridge
+cd ~/ros2_ws && python3 lowstate_to_jointstate.py
+
+# 4 — robot_state_publisher (Go2 URDF -> /tf, /robot_description)
+ros2 run robot_state_publisher robot_state_publisher \
+  ~/unitree_ros/robots/go2_description/urdf/go2_description.urdf
+
+# 5 — ROS 2 (rclpy) teleop
+cd ~/ros2_ws && python3 ros_teleop_go2.py
 ```
+
+Quick sanity check (any sourced terminal): `ros2 topic list` should show
+`/lowcmd /lowstate /sportmodestate ...`, and `ros2 topic info /lowcmd` should show
+`Publisher count: 1` while the teleop runs.
+
+**Every consumer (sim, bridge, teleop, robot_state_publisher, foxglove_bridge) must
+source the same `setup_sim.sh` (multicast = true), and multicast must be enabled on
+`lo`.** A mismatch here is the single most common cause of "topics visible but no data".
 
 ### `unitree_ros2` build notes (gotchas hit during setup)
 
@@ -178,14 +274,14 @@ ros2 topic echo /lowstate --once
 
 ---
 
-## 5. Known limitations & open issues
+## 6. Known limitations & open issues
 
 ### 1. No GUI inside the container
 The MuJoCo viewer fails to open under XQuartz from the container
 (`libGL: failed to load driver: swrast`, `could not create window`). This is the
 known macOS → Docker → XQuartz → OpenGL limitation. The container therefore runs the
-sim **headless**; visualization is only available either on the macOS-native sim or by
-inspecting `/lowstate` / `/sportmodestate` topics.
+sim **headless**; visualization is done through Foxglove (section 4) or by inspecting
+`/lowstate` / `/sportmodestate` topics.
 
 ### 2. Locomotion (walking) is not implemented
 The simulator is **low-level only** — it accepts joint commands and applies a PD law,
@@ -194,7 +290,8 @@ commands are only stable for quasi-static poses with all feet planted. Walking w
 require either a hand-written gait + balance controller or, more realistically, a
 **reinforcement-learning locomotion policy** (e.g. trained in MuJoCo Playground / Isaac
 and exported for inference). The current teleop is intentionally limited to body-pose
-control.
+control. (This is also why the IMU roll/pitch barely changes when commanded — the robot
+keeps all feet planted and stays balanced rather than tilting its body.)
 
 ### 3. DDS discovery on loopback needs `NET_ADMIN` + multicast
 ROS 2 could not discover the sim's topics over `lo` until multicast was enabled on the
@@ -202,7 +299,8 @@ loopback interface (`ip link set lo multicast on`), which requires running the
 container with `--cap-add NET_ADMIN`. Without this, `ros2 topic list` only shows
 `/parameter_events` and `/rosout`. **This is the most non-standard part of the setup**
 and a likely point to review — there may be a cleaner CycloneDDS discovery
-configuration for single-host / container use.
+configuration for single-host / container use. Note also that `ip link set lo multicast
+on` is a runtime setting and must be re-applied each time the container is (re)started.
 
 ### 4. Two CycloneDDS installations coexist
 The SDK uses a source-built CycloneDDS (`CYCLONEDDS_HOME=~/cyclonedds/install`), while
@@ -215,28 +313,60 @@ The Mac-native sim and the container's ROS 2 cannot communicate (Docker Desktop 
 boundary). Everything in the ROS 2 path must run **inside the same container**. The
 macOS-native setup is only useful for the visual/SDK demo, not for ROS 2.
 
+### 6. Foxglove mesh rendering needs the desktop app + `file://` paths
+The Go2 URDF uses `package://` mesh paths, which the Foxglove **web** app cannot
+resolve — it then shows only TF axes. Meshes render only in the **desktop** app, and
+only after rewriting the paths to absolute `file://` paths and loading the URDF as a
+"File path" custom layer (see section 4).
+
 ---
 
-## 6. File inventory
+## 7. File inventory
+
+The repository layout:
+
+```
+go2_sim/
+  mac/                      # macOS-native (Unitree SDK based)
+    pose_go2.py
+    demo_go2.py
+    key_teleop_go2.py
+    config_mac.py
+  container/                # Docker ROS 2 environment
+    sim_headless.py
+    ros_teleop_go2.py
+    lowstate_to_jointstate.py
+    setup_sim.sh
+    config_container.py
+README.md
+```
 
 **`go2_sim/mac/` — macOS-native (Unitree SDK based):**
 - `pose_go2.py` — move the robot to a named static pose (interpolated).
 - `demo_go2.py` — scripted pose sequence.
 - `key_teleop_go2.py` — interactive keyboard teleop (terminal input, SDK pub/sub).
-- `config_mac.py` — sim config for macOS (`INTERFACE="lo0"`, `USE_JOYSTICK=0`, `DOMAIN_ID=1`, `SIMULATE_DT=0.002`).
+- `config_mac.py` — sim config for macOS (`INTERFACE="lo0"`, `USE_JOYSTICK=0`,
+  `DOMAIN_ID=1`, `SIMULATE_DT=0.002`).
 
-**`go2_sim/container/` — simulation:**
+**`go2_sim/container/` — simulation & ROS 2:**
 - `sim_headless.py` — runs the MuJoCo physics + DDS bridge with no viewer window.
-- `config_container.py` — sim config for the container (`INTERFACE="lo"`, `USE_JOYSTICK=0`, `DOMAIN_ID=1`).
-
-**`go2_sim/container/` — ROS 2:**
+- `config_container.py` — sim config for the container (`INTERFACE="lo"`,
+  `USE_JOYSTICK=0`, `DOMAIN_ID=1`).
+- `ros_teleop_go2.py` — **the main control deliverable**: rclpy node publishing
+  `unitree_go/msg/LowCmd` to `/lowcmd`, subscribing `/lowstate`, with SDK-computed CRC.
+- `lowstate_to_jointstate.py` — bridges `/lowstate` to `/joint_states` (best-effort QoS,
+  motor-order → URDF joint-name mapping) so `robot_state_publisher` can drive the
+  Foxglove 3D model.
 - `setup_sim.sh` — sources ROS 2 + `unitree_ros2` + CycloneDDS and sets the
   loopback/simulation DDS configuration.
-- `ros_teleop_go2.py` — **the main deliverable**: rclpy node publishing
-  `unitree_go/msg/LowCmd` to `/lowcmd`, subscribing `/lowstate`, with SDK-computed CRC.
+
+Not committed (cloned / rebuilt via the instructions above): `unitree_ros2`,
+`unitree_mujoco`, `unitree_sdk2_python`, `cyclonedds`, and `unitree_ros` (the Go2 URDF /
+mesh description used for visualization).
+
 ---
 
-## 7. Key technical notes (lessons learned)
+## 8. Key technical notes (lessons learned)
 
 - **Leg tremor** in the sim is an underdamped PD oscillation. It is fixed by reducing
   the simulation timestep (`SIMULATE_DT` 0.005 → 0.002), **not** by raising `kd` —
@@ -246,3 +376,7 @@ macOS-native setup is only useful for the visual/SDK demo, not for ROS 2.
 - The Unitree SDK API (`ChannelPublisher`/`ChannelSubscriber`) and ROS 2
   (`rclpy` publisher/subscriber) are two different APIs over the **same** DDS layer;
   the pub/sub concepts map directly between them.
+- **QoS matters for Unitree topics:** `/lowstate` (and the other state topics) are
+  published best-effort. A default reliable subscription silently receives nothing;
+  use `qos_profile_sensor_data`. `foxglove_bridge` adapts automatically, which is why it
+  could read `/lowstate` when a naive rclpy subscriber could not.

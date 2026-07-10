@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Keyboard-teleop crawl gait for the Go2 sim.
-  up / down arrow : walk forward / backward
-  space           : stop (stand in place)
-  w / s           : increase / decrease stride length (live tuning)
-  e / d           : increase / decrease swing height (live tuning)
-  r / f           : increase / decrease weight-shift (live tuning)
-  t / g           : faster / slower cycle time (live tuning)
-  Ctrl+C          : quit"""
+"""Keyboard-teleop crawl gait for the Go2 sim (letter keys for reliability).
+  i / k : walk forward / backward       space : stop (stand in place)
+  w / s : stride +/-      e / d : swing height +/-
+  r / f : weight-shift +/-      t / g : faster / slower cycle
+  Ctrl+C : quit
+Publishes unitree_go/msg/LowCmd to /lowcmd with SDK-computed CRC."""
 import sys, time, math, select, termios, tty
 import numpy as np
 import rclpy
@@ -26,9 +24,9 @@ SMOOTH  = 0.05
 CYCLE_T  = 5.0
 DUTY     = 0.75
 STEP_LEN = 0.08
-STEP_H   = 0.06
-SHIFT_Y  = 0.05
-SHIFT_X  = 0.02
+STEP_H   = 0.08
+SHIFT_Y  = 0.04
+SHIFT_X  = 0.0
 
 FX_SIGN = [ +1, +1, -1, -1 ]
 FY_SIGN = [ -1, +1, -1, +1 ]
@@ -71,7 +69,8 @@ def gait_targets(phase, stride, lift, shx, shy):
         p = (phase - SWING_START[leg]) % 1.0
         if p < SW:
             s = p / SW
-            gx = -stride/2 + stride*s
+            frac = (1 - math.cos(math.pi*s)) / 2   # ease: zero horiz vel at lift-off & touchdown
+            gx = -stride/2 + stride*frac
             gz = lift*math.sin(math.pi*s)
         else:
             u = (p - SW) / DUTY
@@ -96,14 +95,16 @@ def read_keys():
     data = sys.stdin.read(1)
     while select.select([sys.stdin], [], [], 0)[0]:
         data += sys.stdin.read(1)
-    toks, i = [], 0
+    out, i = [], 0
     while i < len(data):
-        if data[i] == '\x1b' and i+2 < len(data) and data[i+1] == '[':
-            a = {'A':'UP','B':'DOWN','C':'RIGHT','D':'LEFT'}.get(data[i+2])
-            if a: toks.append(a); i += 3; continue
-            i += 1; continue
-        toks.append(data[i]); i += 1
-    return toks
+        if data[i] == '\x1b':               # skip escape sequences (arrows) entirely
+            i += 1
+            if i < len(data) and data[i] == '[':
+                i += 1
+                if i < len(data): i += 1
+            continue
+        out.append(data[i]); i += 1
+    return out
 
 class GaitTeleop(Node):
     def __init__(self):
@@ -125,10 +126,10 @@ class GaitTeleop(Node):
         self.q_meas = np.array([msg.motor_state[i].q for i in range(12)], dtype=float)
 
     def apply_key(self, tok):
-        k = tok.lower() if len(tok) == 1 else tok
-        if   tok == 'UP':    self.direction = +1
-        elif tok == 'DOWN':  self.direction = -1
-        elif tok == ' ':     self.direction = 0
+        k = tok.lower()
+        if   k == 'i': self.direction = +1
+        elif k == 'k': self.direction = -1
+        elif tok == ' ': self.direction = 0
         elif k == 'w': self.stride = min(0.16, self.stride + 0.01)
         elif k == 's': self.stride = max(0.02, self.stride - 0.01)
         elif k == 'e': self.lift = min(0.12, self.lift + 0.01)
@@ -158,8 +159,8 @@ class GaitTeleop(Node):
         return msg
 
 HELP = """
-=== Go2 crawl-gait teleop ===
-  up/down : forward / backward      space : stop (stand)
+=== Go2 crawl-gait teleop (letter keys) ===
+  i/k : forward / backward      space : stop (stand)
   w/s : stride +/-    e/d : swing height +/-    r/f : weight-shift +/-    t/g : faster/slower
   Ctrl+C : quit
 """
